@@ -1,0 +1,6 @@
+# 工作痕迹，不入库
+asar-slice/
+*.log
+node_modules/
+dist/
+.DS_Store

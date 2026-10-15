@@ -1,0 +1,16 @@
+# dsh-vision-guard 装载补丁
+# 安装方式：profiles\<name>\package.json dependencies 加 link: 依赖 + junction 直连本目录 + 重启 DSH
+# （与 dsh-plugin-task-notify / dsh-plugin-host-monitor 同模式；file:/link: 插件不进 dsh.profile.bundles）
+- insert:
+  - id: dsh-vision-guard
+    name: dsh-vision-guard
+    config:
+      dedupe:
+        enabled: true
+        placeholder: "[同一张图已附在 #{0}，不再重复发送。需要时可按路径重新 read_image。]"
+      cap:
+        enabled: false
+        keepRecent: 4
+      offload:
+        enabled: false
+        on400: true
