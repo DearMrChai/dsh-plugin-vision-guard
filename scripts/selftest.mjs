@@ -187,5 +187,33 @@ const B = 'sha256:' + 'b'.repeat(64);
 	assert(handlers.size === 0, 'case12 disabled: no hook registered');
 }
 
+// ─ case 13: 日志通道抛错 → apply 不抛、hook 仍完成去重（日志永不阻塞）
+{
+	const handlers = new Map();
+	const ctx = {
+		on(name, fn) { handlers.set(name, fn); return () => {}; },
+		emit() { throw new Error('log sink boom'); }
+	};
+	let applied = true;
+	try {
+		apply(ctx, { dedupe: { enabled: true, placeholder: '[dup #{0}]' } });
+	} catch {
+		applied = false;
+	}
+	assert(applied, 'case13 apply does not throw when emit throws');
+
+	const base = {
+		kind: 'enter',
+		messages: [
+			{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: A } }] },
+			{ role: 'tool', content: [{ type: 'image', attachment: { attachmentId: A } }] }
+		]
+	};
+	let calls = 0;
+	const out = await handlers.get('agent/pre-step')({}, async () => { calls += 1; return base; });
+	assert(calls === 1, 'case13 next still called once');
+	assert(countImages(out.messages) === 1, 'case13 dedupe still applied despite log failure');
+}
+
 console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
 process.exit(failed === 0 ? 0 : 1);

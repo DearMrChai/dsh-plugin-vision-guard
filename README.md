@@ -53,12 +53,12 @@ DSH 视觉请求守卫。**本期（0.1.x）只做一件事**：在 LLM 请求�
 ### 方式二：从 GitHub 装
 
 ```
-& "<安装根>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:DearMrChai/dsh-plugin-vision-guard#v0.1.1
+& "<安装根>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:DearMrChai/dsh-plugin-vision-guard#v0.1.2
 ```
 
 - pnpm 自动完成三件事：依赖写入 `profiles\<name>\package.json`、拉源码进 profile `node_modules`、**自动对账 `dsh.profile.bundles`**
 - 装完**重启 DSH 桌面端**
-- `<sha>` 可取 tag（`#v0.1.1`）或 commit；不锁也行（跟默认分支走）
+- `<sha>` 可取 tag（`#v0.1.2`）或 commit；不锁也行（跟默认分支走）
 
 **已知三个坑**（都是实测踩到的，别人第一次装同样会踩）：
 
@@ -108,14 +108,14 @@ profile 层可用同 `id` 覆盖 `config`（patch 对 `config` 是**整体替换
 
 | 版本 | 内容 |
 |---|---|
-| **0.1.1**（当前） | dedupe 上线 + 打包/钩子契约修复 |
+| **0.1.2**（当前） | dedupe 上线 + 打包/钩子契约修复 + 日志不可抛 |
 | 0.2.0（将来，需求触发） | `cap.enabled=true`：保留最新 N 张，老图替换为占位（接 dsh-image-guard 的"最新 N 张"思路，但用 attachmentId 做身份，**不靠"最新 N"裁剪**） |
 | 0.3.0（将来，需求触发） | `offload.enabled=true`：把 vLLM 400 "At most N image(s)" 归成 DSH 的 `IMAGE_OFFLOAD_REQUIRED`，触发官方 [dsh-compaction-image-offload](https://dshmarket.com) 的 offload 链（代价：图永久降级、前缀缓存碎——只在 dedupe + cap 都救不了时才开） |
 
 ## 自测（本地）
 
 ```
-node scripts/selftest.mjs     # 33 case：case1-8 纯函数，case9-12 钩子契约
+node scripts/selftest.mjs     # 34 case：case1-8 纯函数，case9-13 钩子契约（含日志不可抛）
 ```
 
 无 `prepare` 钩子（git 装不跑自测，避免给别的用户加安装门槛）；`prepack` 只在 `npm pack` / `pnpm pack` 时跑，
