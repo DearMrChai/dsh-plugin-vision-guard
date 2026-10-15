@@ -1,6 +1,6 @@
 {
 	"name": "dsh-vision-guard",
-	"version": "0.2.0",
+	"version": "0.2.2",
 	"description": "DSH 视觉请求守卫：按 attachmentId 去重（同一张图一次请求只发一次），走官方 image/offload 事件，预留 cap-N 扩展位",
 	"private": false,
 	"license": "MIT",

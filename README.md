@@ -54,7 +54,7 @@ DSH 视觉请求守卫。**本期（0.2.x）只做一件事**：按 `attachmentI
 - `agent/pre-step` 的 `next()` **恰好调用一次**，本插件原样返回基底 decision（不改写）
 - 本插件只做「追加一条会话事件」：任何异常都吞掉并记日志，**绝不阻塞请求**
 - 宿主没挂 offload 投影时，Session 会拒绝追加该事件（官方 README：「缺少处理器时拒绝追加和恢复」）⇒ 拒绝是安全的，插件记 `hook error` 后跳过
-- 自测覆盖：40 条断言，含 next 恰好一次 / decision 原样返回 / append 抛错不阻塞 / 表层枚举抛错回落 / 日志通道抛错不炸 / 全关不注册
+- 自测覆盖：42 条断言，含 next 恰好一次 / decision 原样返回 / append 抛错不阻塞 / 表层枚举抛错回落 / 日志通道抛错不炸 / 全关不注册
 
 ## 安装
 
@@ -73,12 +73,12 @@ DSH 视觉请求守卫。**本期（0.2.x）只做一件事**：按 `attachmentI
 ### 方式二：从 GitHub 装
 
 ```
-& "<安装根>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:DearMrChai/dsh-plugin-vision-guard#v0.2.0
+& "<安装根>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:DearMrChai/dsh-plugin-vision-guard#v0.2.2
 ```
 
 - pnpm 自动完成三件事：依赖写入 `profiles\<name>\package.json`、拉源码进 profile `node_modules`、**自动对账 `dsh.profile.bundles`**
 - 装完**重启 DSH 桌面端**
-- ref 可取 tag（`#v0.2.0`）或 commit；不锁也行（跟默认分支走）
+- ref 可取 tag（`#v0.2.2`）或 commit；不锁也行（跟默认分支走）
 
 **已知三个坑**（都是实测踩到的，别人第一次装同样会踩）：
 
@@ -133,13 +133,13 @@ profile 层可用同 `id` 覆盖 `config`（patch 对 `config` 是**整体替换
 | 版本 | 内容 |
 |---|---|
 | 0.1.0 → 0.1.2 | 按请求体去重的首版 + 打包/钩子契约/日志修复（**实测无效**，见 0.2.0） |
-| **0.2.0**（当前） | 改用官方 `image/offload` 事件与投影；配置去掉 `placeholder` / `offload` 两段 |
+| **0.2.2**（当前） | 改用官方 `image/offload` 事件与投影；配置去掉 `placeholder` / `offload` 两段 |
 | 0.3.0（将来，需求触发） | `cap.enabled=true`：保留最新 N 张，老图登记下车（接 dsh-image-guard 的"最新 N 张"思路，**身份仍用 attachmentId**） |
 
 ## 自测（本地）
 
 ```
-node scripts/selftest.mjs     # 40 条断言：case1-11 纯函数，case12-20 钩子契约
+node scripts/selftest.mjs     # 42 条断言：case1-11 纯函数，case12-20 钩子契约
 ```
 
 无 `prepare` 钩子（git 装不跑自测，避免给别的用户加安装门槛）；`prepack` 只在 `npm pack` / `pnpm pack` 时跑，

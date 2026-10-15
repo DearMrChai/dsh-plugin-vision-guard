@@ -18,6 +18,8 @@ const img = (id, extra) => ({ type: 'image', attachment: { attachmentId: id }, .
 const txt = (text) => ({ type: 'text', text });
 
 // 假会话：surface.nodes + eventAt + deriveEventMessage + append（记录调用）
+// 事件形状镜像真实：user/message → data.content；tool/result → data.message.content。
+// 节点可带 projected（投影后的 content），用来验证「粗筛看原始、标记看投影」。
 function fakeSession(rawNodes, opts = {}) {
 	const nodes = rawNodes.map((n) => ({ type: 'user/message', ...n }));
 	const calls = [];
@@ -25,8 +27,18 @@ function fakeSession(rawNodes, opts = {}) {
 		calls,
 		session: {
 			surface: { nodes: nodes.map((n) => n.seq) },
-			eventAt(seq) { if (opts.eventAtThrows) throw new Error('eventAt boom'); return nodes.find((n) => n.seq === seq); },
-			deriveEventMessage(event) { return { role: 'user', content: event.content }; },
+			eventAt(seq) {
+				if (opts.eventAtThrows) throw new Error('eventAt boom');
+				const n = nodes.find((x) => x.seq === seq);
+				if (!n) return undefined;
+				return n.type === 'tool/result'
+					? { type: n.type, seq: n.seq, data: { message: { role: 'tool', content: n.content } } }
+					: { type: n.type, seq: n.seq, data: { content: n.content } };
+			},
+			deriveEventMessage(event) {
+				const n = nodes.find((x) => x.seq === event.seq);
+				return { role: 'user', content: n?.projected ?? n?.content };
+			},
 			append(type, data) { if (opts.appendThrows) throw new Error('no image/offload projection'); calls.push([type, data]); }
 		}
 	};
@@ -250,5 +262,31 @@ function fakeCtx(opts = {}) {
 	assert(out === rejected, 'case20 reject 透传');
 }
 
-console.log(failed === 0 ? '\nALL PASS (' + 40 + ' assertions)' : '\n' + failed + ' FAILED');
+// ─ case 21: tool/result 事件（data.message.content）也能被粗筛命中并下车
+{
+	const { ctx } = fakeCtx();
+	const { session, calls } = fakeSession([
+		{ seq: 9, content: [txt('你能看到信息吗'), img(A)] },
+		{ seq: 29, type: 'tool/result', content: [txt('read_image 结果'), img(A)] }
+	]);
+	apply(ctx, { dedupe: { enabled: true } });
+	await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => ({ kind: 'enter', messages: [] }));
+	assert(calls.length === 1 && calls[0][0] === 'image/offload', 'case21 tool/result 路径能下车');
+	assert(JSON.stringify(calls[0][1]) === JSON.stringify({ targets: [{ seq: 29, imageIndexes: [0] }] }), 'case21 targets 指向 tool/result 序号');
+}
+
+// ─ case 22: offloaded 标记只看投影结果 —— 原始含图、投影已下车时不应再登记
+{
+	const { ctx } = fakeCtx();
+	const rawA = [img(A)];
+	const { session, calls } = fakeSession([
+		{ seq: 9, content: rawA },
+		{ seq: 29, content: rawA, projected: [img(A, { offloaded: true })] }
+	]);
+	apply(ctx, { dedupe: { enabled: true } });
+	await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => ({ kind: 'enter', messages: [] }));
+	assert(calls.length === 0, 'case22 已下车（投影态）不重复登记');
+}
+
+console.log(failed === 0 ? '\nALL PASS (' + 42 + ' assertions)' : '\n' + failed + ' FAILED');
 process.exit(failed === 0 ? 0 : 1);
