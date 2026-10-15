@@ -1,16 +1,16 @@
 # dsh-vision-guard 装载补丁
-# 安装方式：profiles\<name>\package.json dependencies 加 link: 依赖 + junction 直连本目录 + 重启 DSH
-# （与 dsh-plugin-task-notify / dsh-plugin-host-monitor 同模式；file:/link: 插件不进 dsh.profile.bundles）
+# 安装（桌面端，与 task-notify / host-monitor 同模式）：
+#   profiles\<name>\package.json dependencies 加 link: 依赖 + junction 直连本目录
+#   + dsh.profile.bundles 显式列出本包名 + 重启 DSH
+#   （本包声明了 dsh.bundle.patch，`dsh plugin add/remove` 会自动对账 bundles 列表）
+# 运行时前提：宿主需挂载 @deepseek-ai/dsh-compaction-image-offload（随附 dsh 基础组合已挂），
+# 否则 Session 会拒绝本插件追加的 image/offload 事件——插件会记日志并跳过，不影响请求。
 - insert:
   - id: dsh-vision-guard
     name: dsh-vision-guard
     config:
       dedupe:
         enabled: true
-        placeholder: "[同一张图已附在 #{0}，不再重复发送。需要时可按路径重新 read_image。]"
       cap:
         enabled: false
         keepRecent: 4
-      offload:
-        enabled: false
-        on400: true

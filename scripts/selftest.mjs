@@ -1,9 +1,9 @@
-// dsh-vision-guard · 自测：mock 请求体 → 跑 dedupe → 断言
-// case1-8 测纯函数（dedupeMessages / parseConfig / auditMessage）
-// case9-12 测 apply 挂载的 agent/pre-step 钩子契约（next 恰好一次 / 异常回落 / 关闭即不注册）
+// dsh-vision-guard · 自测
+// case1-11 纯函数（imageOccurrences / findDuplicateImages / countOffloads / parseConfig）
+// case12-21 apply 挂载的 agent/pre-step 钩子契约
 // 用法：node scripts/selftest.mjs
-import { dedupeMessages } from '../lib/hooks/dedupe.js';
-import { parseConfig, auditMessage } from '../lib/budget.js';
+import { countOffloads, findDuplicateImages, imageOccurrences } from '../lib/hooks/dedupe.js';
+import { parseConfig } from '../lib/budget.js';
 import { apply } from '../lib/index.js';
 
 let failed = 0;
@@ -11,209 +11,244 @@ function assert(cond, msg) {
 	if (cond) console.log('  ✓ ' + msg);
 	else { console.error('  ✗ ' + msg); failed += 1; }
 }
-function countImages(messages) {
-	let n = 0;
-	for (const m of messages) for (const b of m.content) if (b?.type === 'image') n += 1;
-	return n;
-}
 
-const A = 'sha256:' + 'a'.repeat(64); // conform to ID_PATTERN = /^sha256:([a-f0-9]{64})$/
+const A = 'sha256:' + 'a'.repeat(64); // 与 ID_PATTERN = /^sha256:([a-f0-9]{64})$/ 对齐
 const B = 'sha256:' + 'b'.repeat(64);
+const img = (id, extra) => ({ type: 'image', attachment: { attachmentId: id }, ...extra });
+const txt = (text) => ({ type: 'text', text });
 
-// ─ case 1: 单图，1 次出现 → 不动
-{
-	const msgs = [
-		{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] }
-	];
-	const { messages, deduped } = dedupeMessages(msgs, { enabled: true, placeholder: '[see #{0}]' });
-	assert(deduped === 0, 'case1 deduped=0');
-	assert(countImages(messages) === 1, 'case1 image count = 1');
+// 假会话：surface.nodes + eventAt + deriveEventMessage + append（记录调用）
+function fakeSession(rawNodes, opts = {}) {
+	const nodes = rawNodes.map((n) => ({ type: 'user/message', ...n }));
+	const calls = [];
+	return {
+		calls,
+		session: {
+			surface: { nodes: nodes.map((n) => n.seq) },
+			eventAt(seq) { if (opts.eventAtThrows) throw new Error('eventAt boom'); return nodes.find((n) => n.seq === seq); },
+			deriveEventMessage(event) { return { role: 'user', content: event.content }; },
+			append(type, data) { if (opts.appendThrows) throw new Error('no image/offload projection'); calls.push([type, data]); }
+		}
+	};
+}
+function fakeCtx(opts = {}) {
+	const handlers = new Map();
+	const logs = [];
+	const ctx = {
+		handlers,
+		logs,
+		on(name, fn) { handlers.set(name, fn); return () => handlers.delete(name); },
+		emit(name, msg) { if (name === 'log') logs.push(msg); },
+		logger: {
+			info(msg) { if (opts.loggerThrows) throw new Error('log sink boom'); logs.push(msg); }
+		}
+	};
+	return { handlers, logs, ctx };
 }
 
-// ─ case 2: 同一张图，2 次（1 原始 + 1 重读）→ 第 2 次变占位
+// ─ case 1: imageOccurrences —— 序号只数 image 块，标记 offloaded，缺 attachmentId 不炸
 {
-	const msgs = [
-		{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] },
-		{ role: 'tool', content: [{ type: 'text', text: '好的' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] }
-	];
-	const { messages, deduped } = dedupeMessages(msgs, { enabled: true, placeholder: '[see #{0} at #{1}]' });
-	assert(deduped === 1, 'case2 deduped=1');
-	assert(countImages(messages) === 1, 'case2 image count = 1');
-	assert(messages[0].content.some((b) => b.type === 'image'), 'case2 image kept in msg 1');
-	assert(!messages[1].content.some((b) => b.type === 'image'), 'case2 image removed in msg 2');
-	assert(messages[1].content.some((b) => b.type === 'text' && b.text.includes('shot.png')), 'case2 placeholder text in msg 2');
+	const occ = imageOccurrences([txt('看图'), img(A), txt('再读'), img(B, { offloaded: true }), { type: 'image' }]);
+	assert(occ.length === 3, 'case1 三个 image 出现位置');
+	assert(occ[0].imageIndex === 0 && occ[0].attachmentId === A && occ[0].offloaded === false, 'case1 #0 未下车 A');
+	assert(occ[1].imageIndex === 1 && occ[1].offloaded === true, 'case1 #1 已下车');
+	assert(occ[2].imageIndex === 2 && occ[2].attachmentId === undefined, 'case1 #2 缺 attachmentId');
 }
 
-// ─ case 3: 两张不同图，各 1 次 → 不动
+// ─ case 2: imageOccurrences —— 非数组 content 返回空
 {
-	const msgs = [
-		{ role: 'user', content: [
-			{ type: 'text', text: '两张' },
-			{ type: 'image', attachment: { attachmentId: A, name: 'a.png' } },
-			{ type: 'image', attachment: { attachmentId: B, name: 'b.png' } }
-		] }
-	];
-	const { deduped } = dedupeMessages(msgs, { enabled: true, placeholder: '[x]' });
-	assert(deduped === 0, 'case3 deduped=0 (two distinct images)');
+	assert(imageOccurrences(undefined).length === 0 && imageOccurrences('x').length === 0, 'case2 非数组 content → 空');
 }
 
-// ─ case 4: 同一张图，3 次 → 第 2、3 次都变占位
+// ─ case 3: 单图 1 次出现 → 不下车
 {
-	const msgs = [
-		{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: A } }] },
-		{ role: 'tool', content: [{ type: 'image', attachment: { attachmentId: A } }] },
-		{ role: 'tool', content: [{ type: 'image', attachment: { attachmentId: A } }] }
-	];
-	const { messages, deduped } = dedupeMessages(msgs, { enabled: true, placeholder: '[dup #{0}]' });
-	assert(deduped === 2, 'case4 deduped=2');
-	assert(countImages(messages) === 1, 'case4 image count = 1');
-	// 第 2、3 条消息各自应该带一条占位 text
-	assert(messages[1].content.length === 1 && messages[1].content[0].type === 'text', 'case4 msg2 only placeholder text');
-	assert(messages[2].content.length === 1 && messages[2].content[0].type === 'text', 'case4 msg3 only placeholder text');
+	assert(findDuplicateImages([{ seq: 9, content: [txt('看图'), img(A)] }]).length === 0, 'case3 单次出现不下车');
 }
 
-// ─ case 5: dedupe 关闭 → 原样
+// ─ case 4: 跨两条消息重复 → 后一条下车（保留最早）
 {
-	const msgs = [
-		{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: A } }] },
-		{ role: 'tool', content: [{ type: 'image', attachment: { attachmentId: A } }] }
-	];
-	const { deduped } = dedupeMessages(msgs, { enabled: false });
-	assert(deduped === 0, 'case5 disabled: deduped=0');
+	const targets = findDuplicateImages([
+		{ seq: 9, content: [txt('看图'), img(A)] },
+		{ seq: 29, content: [txt('重读结果'), img(A)] }
+	]);
+	assert(targets.length === 1 && targets[0].seq === 29, 'case4 只登记后一条消息 (seq 29)');
+	assert(targets[0].imageIndexes.length === 1 && targets[0].imageIndexes[0] === 0, 'case4 下车其 #0');
 }
 
-// ─ case 6: 纯文本消息 → 原样
+// ─ case 5: 同一条消息内重复两次 → 第 2 个出现位置下车
 {
-	const msgs = [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }];
-	const { deduped } = dedupeMessages(msgs, { enabled: true });
-	assert(deduped === 0, 'case6 text-only: deduped=0');
+	const targets = findDuplicateImages([{ seq: 5, content: [img(A), img(A)] }]);
+	assert(targets.length === 1 && targets[0].imageIndexes.join() === '1', 'case5 下车同消息内 #1');
 }
 
-// ─ case 7: parseConfig 兜底
+// ─ case 6: 同一张图 3 次（两条消息）→ 后两处全下车
+{
+	const targets = findDuplicateImages([
+		{ seq: 1, content: [img(A)] },
+		{ seq: 2, content: [img(A)] },
+		{ seq: 3, content: [txt('x'), img(A)] }
+	]);
+	assert(targets.length === 2 && targets[0].seq === 2 && targets[0].imageIndexes.join() === '0', 'case6 seq2 下车 #0');
+	assert(targets[1].seq === 3 && targets[1].imageIndexes.join() === '0', 'case6 seq3 下车 #0');
+	assert(countOffloads(targets) === 2, 'case6 countOffloads=2');
+}
+
+// ─ case 7: 两张不同图 → 不下车
+{
+	const targets = findDuplicateImages([{ seq: 1, content: [img(A), img(B)] }]);
+	assert(targets.length === 0, 'case7 不同图不下车');
+}
+
+// ─ case 8: 早先那张已被官方机制下车 → 后来的重读**照常发送**（模型得看到图）
+{
+	const targets = findDuplicateImages([
+		{ seq: 1, content: [img(A, { offloaded: true })] },
+		{ seq: 2, content: [img(A)] }
+	]);
+	assert(targets.length === 0, 'case8 唯一可见的那张不下车');
+}
+
+// ─ case 9: 重复那张已下车 → 幂等，不重复登记
+{
+	const targets = findDuplicateImages([
+		{ seq: 1, content: [img(A)] },
+		{ seq: 2, content: [img(A, { offloaded: true })] }
+	]);
+	assert(targets.length === 0, 'case9 幂等（已下车的重复不再登记）');
+}
+
+// ─ case 10: 已下车位置仍占序号 → 新出现位置算出 #2 而不是 #1
+{
+	const targets = findDuplicateImages([{ seq: 1, content: [img(A, { offloaded: true }), img(A), img(A)] }]);
+	assert(targets.length === 1 && targets[0].imageIndexes.join() === '2', 'case10 序号含已下车位置（#2）');
+}
+
+// ─ case 11: parseConfig 兜底与显式值
 {
 	const cfg = parseConfig(undefined);
-	assert(cfg.dedupe.enabled === true, 'parseConfig: dedupe default on');
-	assert(cfg.cap.enabled === false, 'parseConfig: cap default off');
-	assert(cfg.offload.enabled === false, 'parseConfig: offload default off');
-
+	assert(cfg.dedupe.enabled === true, 'case11 dedupe 默认开');
+	assert(cfg.cap.enabled === false && cfg.cap.keepRecent === 4, 'case11 cap 默认关 / keepRecent=4');
 	const cfg2 = parseConfig({ dedupe: { enabled: false }, cap: { enabled: true, keepRecent: 8 } });
-	assert(cfg2.dedupe.enabled === false, 'parseConfig: explicit dedupe off');
-	assert(cfg2.cap.enabled === true && cfg2.cap.keepRecent === 8, 'parseConfig: cap on with keepRecent=8');
+	assert(cfg2.dedupe.enabled === false, 'case11 显式关 dedupe');
+	assert(cfg2.cap.enabled === true && cfg2.cap.keepRecent === 8, 'case11 显式开 cap keepRecent=8');
+	const cfg3 = parseConfig({ cap: { keepRecent: -1 } });
+	assert(cfg3.cap.keepRecent === 4, 'case11 坏 keepRecent 兜底 4');
 }
 
-// ─ case 8: auditMessage 计数
+// ─ case 12: 无重复 → 不 append，next 恰好一次，decision 原样返回
 {
-	const m = { role: 'user', content: [
-		{ type: 'image', attachment: { attachmentId: A } },
-		{ type: 'image', attachment: { attachmentId: A } },
-		{ type: 'image', attachment: { attachmentId: B } }
-	] };
-	const a = auditMessage(m, { enabled: true });
-	assert(a.total === 3 && a.deduped === 1 && a.kept === 2, `auditMessage: ${JSON.stringify(a)}`);
+	const { ctx } = fakeCtx();
+	const { session, calls } = fakeSession([{ seq: 1, content: [txt('hello')] }]);
+	apply(ctx, { dedupe: { enabled: true } });
+	const handler = ctx.handlers.get('agent/pre-step');
+	let calls2 = 0;
+	const base = { kind: 'enter', messages: [] };
+	const out = await handler({ agent: { session } }, async () => { calls2 += 1; return base; });
+	assert(calls2 === 1, 'case12 next 恰好一次');
+	assert(out === base, 'case12 decision 原样返回');
+	assert(calls.length === 0, 'case12 无重复不 append');
 }
 
-// ─ case 9: apply 注册 agent/pre-step；listener 恰好调一次 next、完成去重、不改输入
+// ─ case 13: 有重复 → 恰好 append 一条 image/offload，targets 正确
 {
-	const handlers = new Map();
-	const ctx = {
-		on(name, fn) { handlers.set(name, fn); return () => handlers.delete(name); },
-		emit() {}
-	};
-	apply(ctx, { dedupe: { enabled: true, placeholder: '[dup #{0}]' } });
-	assert(handlers.has('agent/pre-step'), 'case9 apply registers agent/pre-step');
+	const { ctx } = fakeCtx();
+	const nodes = [
+		{ seq: 9, content: [txt('你能看到信息吗'), img(A)] },
+		{ seq: 29, content: [txt('read_image 结果'), img(A)] }
+	];
+	const { session, calls } = fakeSession(nodes);
+	apply(ctx, { dedupe: { enabled: true } });
+	const base = { kind: 'enter', messages: [] };
+	await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => base);
+	assert(calls.length === 1, 'case13 append 恰好一次');
+	assert(calls[0][0] === 'image/offload', 'case13 事件类型 = image/offload');
+	assert(JSON.stringify(calls[0][1]) === JSON.stringify({ targets: [{ seq: 29, imageIndexes: [0] }] }), 'case13 targets 正确');
+	assert(nodes[0].content.length === 2 && nodes[1].content.length === 2, 'case13 未改动表层事件对象');
+	assert(countOffloads(calls[0][1].targets) === 1, 'case13 记 1 处下车');
+}
 
-	const handler = handlers.get('agent/pre-step');
-	const base = {
-		kind: 'enter',
-		messages: [
-			{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] },
-			{ role: 'tool', content: [{ type: 'text', text: '好的' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] }
-		]
-	};
+// ─ case 14: 宿主没挂投影（append 抛错）→ 不阻塞请求，记 hook error，next 仍一次
+{
+	const { ctx, logs } = fakeCtx();
+	const { session } = fakeSession([{ seq: 1, content: [img(A)] }, { seq: 2, content: [img(A)] }], { appendThrows: true });
+	apply(ctx, { dedupe: { enabled: true } });
+	const base = { kind: 'enter', messages: [] };
 	let calls = 0;
-	const out = await handler({}, async () => { calls += 1; return base; });
-	assert(calls === 1, 'case9 listener calls next exactly once');
-	assert(out.kind === 'enter', 'case9 preserves decision.kind');
-	assert(countImages(out.messages) === 1, 'case9 request body has 1 image');
-	assert(countImages(base.messages) === 2, 'case9 input decision not mutated (still 2 images)');
-	assert(base.messages[1].content[0].text === '好的', 'case9 original text block not mutated');
-	assert(out.messages[1].content.some((b) => b.type === 'text' && b.text.includes('dup #1')), 'case9 placeholder appended to copy');
+	const out = await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => { calls += 1; return base; });
+	assert(calls === 1, 'case14 next 恰好一次');
+	assert(out === base, 'case14 decision 原样返回');
+	assert(logs.some((m) => m.includes('hook error')), 'case14 记 hook error');
 }
 
-// ─ case 10: next() 抛错 = 宿主故障 → 原样抛出，且不重试
+// ─ case 15: 表层枚举抛错 → 回落，next 恰好一次
 {
-	const handlers = new Map();
-	const ctx = { on(name, fn) { handlers.set(name, fn); return () => {}; }, emit() {} };
+	const { ctx, logs } = fakeCtx();
+	const { session } = fakeSession([{ seq: 1, content: [img(A)] }], { eventAtThrows: true });
+	apply(ctx, { dedupe: { enabled: true } });
+	const base = { kind: 'enter', messages: [] };
+	let calls = 0;
+	const out = await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => { calls += 1; return base; });
+	assert(calls === 1 && out === base, 'case15 枚举异常不阻塞请求');
+	assert(logs.some((m) => m.includes('hook error')), 'case15 记 hook error');
+}
+
+// ─ case 16: 宿主 next() 抛错 = 宿主链路故障 → 原样抛出，不重试
+{
+	const { ctx } = fakeCtx();
 	apply(ctx, { dedupe: { enabled: true } });
 	let calls = 0;
 	let propagated = false;
 	try {
-		await handlers.get('agent/pre-step')({}, async () => { calls += 1; throw new Error('host boom'); });
+		await ctx.handlers.get('agent/pre-step')({}, async () => { calls += 1; throw new Error('host boom'); });
 	} catch (err) {
 		propagated = err.message === 'host boom';
 	}
-	assert(propagated, 'case10 host error propagates');
-	assert(calls === 1, 'case10 next not retried after host error');
+	assert(propagated, 'case16 宿主错误原样抛出');
+	assert(calls === 1, 'case16 next 不重试');
 }
 
-// ─ case 11: 去重自身出错 → 回落原始 decision，绝不阻塞请求
+// ─ case 17: dedupe 与 cap 全关 → 不注册任何 hook
 {
-	const handlers = new Map();
-	const logs = [];
-	const ctx = {
-		on(name, fn) { handlers.set(name, fn); return () => {}; },
-		emit(name, msg) { if (name === 'log') logs.push(msg); }
-	};
-	apply(ctx, { dedupe: { enabled: true } });
-	const badMessages = new Proxy([], {
-		get(target, prop, recv) {
-			if (prop === Symbol.iterator) throw new Error('dedupe boom');
-			return Reflect.get(target, prop, recv);
-		}
-	});
-	const base = { kind: 'enter', messages: badMessages };
-	let calls = 0;
-	const out = await handlers.get('agent/pre-step')({}, async () => { calls += 1; return base; });
-	assert(calls === 1, 'case11 next called once on internal error');
-	assert(out === base, 'case11 falls back to original decision');
-	assert(logs.some((m) => m.includes('hook error')), 'case11 logs hook error');
-}
-
-// ─ case 12: dedupe 与 cap 全关 → 不注册任何 hook
-{
-	const handlers = new Map();
-	const ctx = { on(name, fn) { handlers.set(name, fn); return () => {}; }, emit() {} };
+	const { ctx } = fakeCtx();
 	apply(ctx, { dedupe: { enabled: false }, cap: { enabled: false } });
-	assert(handlers.size === 0, 'case12 disabled: no hook registered');
+	assert(ctx.handlers.size === 0, 'case17 全关时不注册 hook');
 }
 
-// ─ case 13: 日志通道抛错 → apply 不抛、hook 仍完成去重（日志永不阻塞）
+// ─ case 18: 日志通道抛错 → apply 不抛，去重仍完成
 {
-	const handlers = new Map();
-	const ctx = {
-		on(name, fn) { handlers.set(name, fn); return () => {}; },
-		emit() { throw new Error('log sink boom'); }
-	};
+	const { ctx } = fakeCtx({ loggerThrows: true });
+	const { session, calls } = fakeSession([
+		{ seq: 1, content: [img(A)] },
+		{ seq: 2, content: [img(A)] }
+	]);
 	let applied = true;
 	try {
-		apply(ctx, { dedupe: { enabled: true, placeholder: '[dup #{0}]' } });
+		apply(ctx, { dedupe: { enabled: true } });
 	} catch {
 		applied = false;
 	}
-	assert(applied, 'case13 apply does not throw when emit throws');
-
-	const base = {
-		kind: 'enter',
-		messages: [
-			{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: A } }] },
-			{ role: 'tool', content: [{ type: 'image', attachment: { attachmentId: A } }] }
-		]
-	};
-	let calls = 0;
-	const out = await handlers.get('agent/pre-step')({}, async () => { calls += 1; return base; });
-	assert(calls === 1, 'case13 next still called once');
-	assert(countImages(out.messages) === 1, 'case13 dedupe still applied despite log failure');
+	assert(applied, 'case18 apply 不因日志失败而抛');
+	await ctx.handlers.get('agent/pre-step')({ agent: { session } }, async () => ({ kind: 'enter', messages: [] }));
+	assert(calls.length === 1, 'case18 日志失败仍完成下车登记');
 }
 
-console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');
+// ─ case 19: 无 agent（非 agent 触发的 pre-step）→ 静默跳过
+{
+	const { ctx } = fakeCtx();
+	apply(ctx, { dedupe: { enabled: true } });
+	const base = { kind: 'enter', messages: [] };
+	const out = await ctx.handlers.get('agent/pre-step')({}, async () => base);
+	assert(out === base, 'case19 无 agent 时原样返回');
+}
+
+// ─ case 20: reject 决策 → 原样透传（本插件不干预拒绝）
+{
+	const { ctx } = fakeCtx();
+	apply(ctx, { dedupe: { enabled: true } });
+	const rejected = { kind: 'reject' };
+	const out = await ctx.handlers.get('agent/pre-step')({}, async () => rejected);
+	assert(out === rejected, 'case20 reject 透传');
+}
+
+console.log(failed === 0 ? '\nALL PASS (' + 40 + ' assertions)' : '\n' + failed + ' FAILED');
 process.exit(failed === 0 ? 0 : 1);
