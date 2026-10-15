@@ -1,7 +1,10 @@
 // dsh-vision-guard · 自测：mock 请求体 → 跑 dedupe → 断言
+// case1-8 测纯函数（dedupeMessages / parseConfig / auditMessage）
+// case9-12 测 apply 挂载的 agent/pre-step 钩子契约（next 恰好一次 / 异常回落 / 关闭即不注册）
 // 用法：node scripts/selftest.mjs
 import { dedupeMessages } from '../lib/hooks/dedupe.js';
 import { parseConfig, auditMessage } from '../lib/budget.js';
+import { apply } from '../lib/index.js';
 
 let failed = 0;
 function assert(cond, msg) {
@@ -107,6 +110,81 @@ const B = 'sha256:' + 'b'.repeat(64);
 	] };
 	const a = auditMessage(m, { enabled: true });
 	assert(a.total === 3 && a.deduped === 1 && a.kept === 2, `auditMessage: ${JSON.stringify(a)}`);
+}
+
+// ─ case 9: apply 注册 agent/pre-step；listener 恰好调一次 next、完成去重、不改输入
+{
+	const handlers = new Map();
+	const ctx = {
+		on(name, fn) { handlers.set(name, fn); return () => handlers.delete(name); },
+		emit() {}
+	};
+	apply(ctx, { dedupe: { enabled: true, placeholder: '[dup #{0}]' } });
+	assert(handlers.has('agent/pre-step'), 'case9 apply registers agent/pre-step');
+
+	const handler = handlers.get('agent/pre-step');
+	const base = {
+		kind: 'enter',
+		messages: [
+			{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] },
+			{ role: 'tool', content: [{ type: 'text', text: '好的' }, { type: 'image', attachment: { attachmentId: A, name: 'shot.png' } }] }
+		]
+	};
+	let calls = 0;
+	const out = await handler({}, async () => { calls += 1; return base; });
+	assert(calls === 1, 'case9 listener calls next exactly once');
+	assert(out.kind === 'enter', 'case9 preserves decision.kind');
+	assert(countImages(out.messages) === 1, 'case9 request body has 1 image');
+	assert(countImages(base.messages) === 2, 'case9 input decision not mutated (still 2 images)');
+	assert(base.messages[1].content[0].text === '好的', 'case9 original text block not mutated');
+	assert(out.messages[1].content.some((b) => b.type === 'text' && b.text.includes('dup #1')), 'case9 placeholder appended to copy');
+}
+
+// ─ case 10: next() 抛错 = 宿主故障 → 原样抛出，且不重试
+{
+	const handlers = new Map();
+	const ctx = { on(name, fn) { handlers.set(name, fn); return () => {}; }, emit() {} };
+	apply(ctx, { dedupe: { enabled: true } });
+	let calls = 0;
+	let propagated = false;
+	try {
+		await handlers.get('agent/pre-step')({}, async () => { calls += 1; throw new Error('host boom'); });
+	} catch (err) {
+		propagated = err.message === 'host boom';
+	}
+	assert(propagated, 'case10 host error propagates');
+	assert(calls === 1, 'case10 next not retried after host error');
+}
+
+// ─ case 11: 去重自身出错 → 回落原始 decision，绝不阻塞请求
+{
+	const handlers = new Map();
+	const logs = [];
+	const ctx = {
+		on(name, fn) { handlers.set(name, fn); return () => {}; },
+		emit(name, msg) { if (name === 'log') logs.push(msg); }
+	};
+	apply(ctx, { dedupe: { enabled: true } });
+	const badMessages = new Proxy([], {
+		get(target, prop, recv) {
+			if (prop === Symbol.iterator) throw new Error('dedupe boom');
+			return Reflect.get(target, prop, recv);
+		}
+	});
+	const base = { kind: 'enter', messages: badMessages };
+	let calls = 0;
+	const out = await handlers.get('agent/pre-step')({}, async () => { calls += 1; return base; });
+	assert(calls === 1, 'case11 next called once on internal error');
+	assert(out === base, 'case11 falls back to original decision');
+	assert(logs.some((m) => m.includes('hook error')), 'case11 logs hook error');
+}
+
+// ─ case 12: dedupe 与 cap 全关 → 不注册任何 hook
+{
+	const handlers = new Map();
+	const ctx = { on(name, fn) { handlers.set(name, fn); return () => {}; }, emit() {} };
+	apply(ctx, { dedupe: { enabled: false }, cap: { enabled: false } });
+	assert(handlers.size === 0, 'case12 disabled: no hook registered');
 }
 
 console.log(failed === 0 ? '\nALL PASS' : '\n' + failed + ' FAILED');

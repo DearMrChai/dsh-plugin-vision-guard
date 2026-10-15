@@ -1,5 +1,7 @@
 # 工作痕迹，不入库
 asar-slice/
+asar-*.mjs
+_test-push.mjs
 *.log
 node_modules/
 dist/
